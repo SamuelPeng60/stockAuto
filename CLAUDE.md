@@ -16,6 +16,7 @@ $env:PYTHONIOENCODING="utf-8"   # Windows 終端機印中文必設
 .venv\Scripts\python -m st.backtest overnight   # 隔夜腿：T 收盤漲停買 → T+1 開盤賣
 .venv\Scripts\python -m st.backtest short_a --markets TPEX --start 2024-01-01   # 上櫃；輸出檔名帶 _tpex
 .venv\Scripts\python -m st.data fetch --start 2024-05-07 --sources tpex_lite    # 上櫃用精簡來源
+.venv\Scripts\python -m st.data kbars --start 2024-01-01 --end 2026-10-02 --dry-run   # 分 K 需求量試算（不登入、不下載）
 ```
 
 ## 工作規則
@@ -27,7 +28,7 @@ $env:PYTHONIOENCODING="utf-8"   # Windows 終端機印中文必設
 ## 架構
 
 - `src/st/core/`：`prices.py`（檔位、漲跌停價，全部用 Decimal）、`costs.py`、`calendar.py`
-- `src/st/data/`：`fetch.py`（證交所／櫃買下載，同主機間隔 ≥4 秒、檔案存在即跳過）、`parse.py`、`build.py`、`minute.py`（分 K 儲存 `data/minute/<code>/<yyyymm>.parquet`）
+- `src/st/data/`：`fetch.py`（證交所／櫃買下載，同主機間隔 ≥4 秒、檔案存在即跳過）、`parse.py`、`build.py`、`minute.py`（分 K 儲存 `data/minute/<code>/<yyyymm>.parquet`）、`kbars.py`（Shioaji 分 K 下載器：由日 K 算出做多 A／做多 B 需要的股票日，只抓那些；**尚未對真實 API 跑過**）
 - `src/st/backtest/`：`metrics.py`、`segments.py`（報告要求的市場分段）、`intraday.py`（1 分 K 模擬工具）、`runner.py`、`portfolio.py`（跨策略風控：同一檔不得同時持有多空，先進場者優先）
 - `src/st/strategies/`：`short_a.py`（做空 A 日頻＋盤中）、`overnight.py`（隔夜腿日頻）、`long_a.py`（做多 A 隔日沖）、`orb.py`（做多 B／做空 B）
 
@@ -57,4 +58,7 @@ $env:PYTHONIOENCODING="utf-8"   # Windows 終端機印中文必設
 - 做空 A 日 K 停損（`Params.stop_pct`、CLI `--stop`）：**開盤價 +1%～+5% 的固定停損全部讓結果變差**（開高 >2%、2023–：不停損 +0.54% → 停損 3% −0.04%、5% +0.22%）。停損 3% 有 47% 觸發，觸發後約 48% 收盤回到停損價之下；但也有約 40% 收盤漲停。固定幅度停損不可行，要測的是分 K 上的時間停損或站回 VWAP／開盤價停損。
 - T+1 開平或開低時，開→收為 +0.25%／+1.21%（做空 A 會賠）。做多 B 整個選股池的開→收毛報酬為負（−0.27%～−0.68%），待分 K 驗證。
 - 分 K 策略（做多 A、ORB、做空 A 盤中版）已完成並有單元測試，但**尚無分 K 資料**；`portfolio.block_opposite` 尚未接進 `runner.py`。
-- 待辦：補齊上市行情 2020–2022（需使用者同意）；Shioaji kbars 下載器（需 API Key）；處置股／注意股／當沖標的歷史名單；產業別與當沖比重濾網；walk-forward。
+- **分 K 下載（進行中，2026-10-05 暫停，使用者說隔天再處理）**：使用者決定做空的分 K 不抓，先抓上市 2024/1/1–2026/10/2、給做多 A 與做多 B 用。需求量（`kbars --dry-run`）：約 4.2 萬個股票日、848 檔、約 13,000 個請求，存檔估 70–110 MB（做多 A 只留成交值 >1 億、不預先套盤整／量新高濾網；做多 B 含前一交易日）。
+  - **來源未定**：使用者問能否不裝套件、不寫下載器。已告知（憑記憶，未查證）：證交所／櫃買無歷史分 K；Yahoo、富果只有近期；FinMind 純 HTTP 但分 K 要付費；Shioaji 免費但要 `pip install shioaji`。動手前先查官方文件確認歷史範圍、流量上限、費用。
+  - 走 Shioaji 還缺：使用者在根目錄建 `.env`（`SHIOAJI_API_KEY`／`SHIOAJI_SECRET_KEY`，已列入 `.gitignore`）、同意安裝 shioaji、同意補上市日 K 2026/10/1–10/2。到位後先 `--max-requests 20` 試抓，驗證兩個格式假設（ts 為 K 棒結束時間、Volume 單位為張）與實際流量，再問是否全抓。
+- 待辦：補齊上市行情 2020–2022（需使用者同意）；處置股／注意股／當沖標的歷史名單；產業別與當沖比重濾網；walk-forward。
