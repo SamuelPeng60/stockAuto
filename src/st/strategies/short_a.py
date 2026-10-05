@@ -3,7 +3,14 @@
 依據：游騰芳、何怡滿（2022）〈台灣股市漲停次日之當沖績效分析〉，
 2017/4/28–2020/12/31，扣成本後勝率 52%、平均淨報酬 0.24%、盈虧比 1.06。
 
-build_trades 只用日 K；停損與延後進場變體在 simulate_intraday（需 T+1 分 K）。
+build_trades 只用日 K；延後進場變體在 simulate_intraday（需 T+1 分 K）。
+
+只空開高（min_gap）：T+1 開平或開低時盤中反而偏強，放空平均是賠的。開盤價要到集合競價結束才知道，
+實盤只能用 08:59 試撮價判斷，或 09:01 後追空（多付滑價）；回測直接用開盤價，略為樂觀。
+
+日 K 停損（stop_pct）：T+1 最高價 ≥ 開盤價 ×(1+stop_pct) 就視為在停損價回補，否則收盤回補。
+進場在開盤、只有一個停損價，所以日 K 就能判斷有沒有觸發，不需要分 K。但假設「一定能在停損價成交」：
+急拉直接鎖漲停、或觸發瞬間價格穩定措施時，實際回補價會更差甚至買不到。
 尚未排除處置股、變更交易、不能先賣後買的標的（名單資料還沒抓），結果會略為高估可交易性。
 """
 
@@ -18,7 +25,7 @@ import pandas as pd
 from st.backtest.intraday import SHORT, Limits, Trade, slip, stop_fill, vwap
 from st.core.calendar import next_day_map
 from st.core.costs import CostModel
-from st.core.prices import shift_ticks
+from st.core.prices import ceil_to_tick, shift_ticks
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,8 @@ class Params:
     consolidation_days: int = 10  # 「漲停前盤整」的回看天數
     consolidation_range: float = 0.15  # 區間振幅上限
     volume_high_days: int = 5  # 「量創 N 日新高」
+    min_gap: float | None = None  # 只空 T+1 開盤漲幅（相對 T 收盤）> min_gap 的；0.0 = 只空開高
+    stop_pct: float | None = None  # 盤中漲到開盤價 ×(1+stop_pct) 就回補；None = 抱到收盤
 
 
 def _limit_price_eq(a: pd.Series, b: pd.Series) -> pd.Series:
@@ -42,7 +51,7 @@ def add_features(df: pd.DataFrame, p: Params) -> pd.DataFrame:
     # 市場交易日曆：下一個交易日
     d["cal_next"] = d["date"].map(next_day_map(d["date"]))
 
-    for col in ("date", "open", "close", "limit_up", "limit_down"):
+    for col in ("date", "open", "high", "close", "limit_up", "limit_down"):
         d[f"n_{col}"] = g[col].shift(-1)
 
     # 漲停前盤整：T-N..T-1 的（最高 / 最低 − 1）< 門檻
@@ -70,22 +79,36 @@ def build_trades(daily: pd.DataFrame, p: Params = Params()) -> pd.DataFrame:
     # 開盤跌停：賣單排隊不一定成交；收盤漲停：買回排隊不一定成交。先標記，不剔除
     ev["open_at_limit_down"] = _limit_price_eq(ev["n_open"], ev["n_limit_down"])
     ev["close_at_limit_up"] = _limit_price_eq(ev["n_close"], ev["n_limit_up"])
+    ev["open_at_limit_up"] = _limit_price_eq(ev["n_open"], ev["n_limit_up"])  # 整天鎖住的話根本買不回
+
+    ev["gap"] = ev["n_open"] / ev["close"] - 1
+    if p.min_gap is not None:
+        ev = ev[ev["gap"] > p.min_gap].copy()
+
+    # 回補價（未加滑價）：觸發停損 → 停損價，否則收盤價
+    ev["stopped"] = False
+    ev["cover_raw"] = ev["n_close"]
+    if p.stop_pct is not None:
+        lvl = pd.Series([float(ceil_to_tick(Decimal(str(o)) * Decimal(str(1 + p.stop_pct)))) for o in ev["n_open"]],
+                        index=ev.index, dtype=float)
+        ev["stopped"] = ev["n_high"] >= lvl
+        ev["cover_raw"] = ev["n_close"].where(~ev["stopped"], lvl)
 
     slip = p.cost.slippage_ticks
     sell = [max(float(shift_ticks(Decimal(str(o)), -slip)), ld if ld == ld else 0.0)
             for o, ld in zip(ev["n_open"], ev["n_limit_down"])]
     buy = [min(float(shift_ticks(Decimal(str(c)), slip)), lu if lu == lu else float("inf"))
-           for c, lu in zip(ev["n_close"], ev["n_limit_up"])]
+           for c, lu in zip(ev["cover_raw"], ev["n_limit_up"])]
     ev["sell_px"] = sell
     ev["buy_px"] = buy
 
-    ev["gross_ret"] = (ev["n_open"] - ev["n_close"]) / ev["n_open"]
+    ev["gross_ret"] = (ev["n_open"] - ev["cover_raw"]) / ev["n_open"]
     ev["net_ret"] = (ev["sell_px"] - ev["buy_px"]) / ev["sell_px"] - p.cost.round_trip_pct(daytrade=True)
 
     ev = ev.rename(columns={"date": "event_date", "n_date": "trade_date"})
     cols = ["event_date", "trade_date", "market", "code", "name", "close", "volume", "value",
-            "n_open", "n_close", "sell_px", "buy_px", "gross_ret", "net_ret",
-            "f_consolidation", "f_volume_high", "open_at_limit_down", "close_at_limit_up"]
+            "n_open", "n_high", "n_close", "gap", "sell_px", "buy_px", "gross_ret", "net_ret",
+            "f_consolidation", "f_volume_high", "open_at_limit_down", "open_at_limit_up", "close_at_limit_up", "stopped"]
     return ev[cols].sort_values(["trade_date", "code"]).reset_index(drop=True)
 
 
@@ -147,6 +170,11 @@ FILTERS = {
     "漲停前盤整": lambda t: t[t["f_consolidation"]],
     "量創 5 日新高": lambda t: t[t["f_volume_high"]],
     "盤整 且 量創新高": lambda t: t[t["f_consolidation"] & t["f_volume_high"]],
+    # 開盤位置：要到開盤集合競價結束才知道，實盤用試撮價近似
+    "T+1 開高": lambda t: t[t["gap"] > 0],
+    "T+1 開高 >2%": lambda t: t[t["gap"] > 0.02],
+    "T+1 開高 >2% 且未開在漲停": lambda t: t[(t["gap"] > 0.02) & ~t["open_at_limit_up"]],
+    "T+1 開平或開低（對照）": lambda t: t[t["gap"] <= 0],
     # 診斷用：用到 T+1 收盤資訊，不能當實盤濾網，只用來看「買不回」的樣本拖累多少
     "[診斷] 排除 T+1 收盤漲停": lambda t: t[~t["close_at_limit_up"]],
 }

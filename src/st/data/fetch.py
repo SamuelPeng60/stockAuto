@@ -71,6 +71,15 @@ SOURCES: dict[str, Source] = {
             f"?date={d:%Y/%m/%d}&response=json",
             _tpex_ok,
         ),
+        # 上櫃每日收盤行情，不含權證、牛熊證（type=EW）。一天約 0.13 MB，tpex_quotes 含權證約 1.8 MB。
+        # 差異：沒有「次日參考價」與均價；成交量值不含盤後定價交易（比 tpex_quotes 少約 0.5%）
+        Source(
+            "tpex_lite",
+            "www.tpex.org.tw",
+            lambda d: "https://www.tpex.org.tw/www/zh-tw/afterTrading/otc"
+            f"?date={d:%Y/%m/%d}&type=EW&response=json",
+            _tpex_ok,
+        ),
     ]
 }
 

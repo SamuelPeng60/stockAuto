@@ -51,6 +51,11 @@ def _snap(price: Decimal, etf: bool, rounding: str) -> Decimal:
     return (price / tick).to_integral_value(rounding=rounding) * tick
 
 
+def ceil_to_tick(price: Number, etf: bool = False) -> Decimal:
+    """無條件進位到合法檔位（停損價等「至少要到這個價位」的情況）。"""
+    return _snap(_d(price), etf, ROUND_CEILING)
+
+
 def limit_up(ref: Number, etf: bool = False, pct: Number = "0.10") -> Decimal:
     return _snap(_d(ref) * (1 + _d(pct)), etf, ROUND_FLOOR)
 

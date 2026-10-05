@@ -2,8 +2,11 @@
 
 T 日：13:00 前已觸及漲停，13:25 時仍在漲停價 → 以漲停價掛 ROD 買單參加收盤集合競價，沒成交就放棄。
       濾網：漲停前 10 日盤整（振幅 <15%）、量創 5 日新高、當日成交值 >1 億。
-T+1：開盤為平盤以下 → 開盤全部出清；
-     否則開盤賣 1/2，其餘 09:00 起 1 分 K 收盤跌破開盤價 → 下一根開盤出場，最晚 exit_by 全部出場。
+T+1：開盤集合競價全部出清（open_sell_frac=1.0，預設）。
+     做空 A 的證據是漲停股次日開盤後偏弱，續抱等於和做空 A 在同一時段對賭；日 K 回測（st.backtest overnight）
+     也顯示開高後「開盤 → 收盤」平均為負。
+     舊版（open_sell_frac=0.5）保留作對照：開盤為平盤以下全部出清；否則開盤賣 1/2，其餘 09:00 起 1 分 K
+     收盤跌破開盤價 → 下一根開盤出場，最晚 exit_by 全部出場。有分 K 後再驗證 09:00–09:30 這段。
 非當沖，證交稅 0.3%。
 
 收盤排隊能否買到無法從 K 棒得知，提供三種成交假設（fill_mode）：
@@ -33,7 +36,7 @@ class Params:
     use_consolidation: bool = True
     use_volume_high: bool = True
     fill_mode: str = "all"
-    open_sell_frac: float = 0.5
+    open_sell_frac: float = 1.0  # 開盤集合競價賣出比例；<1 時剩餘部位續抱到跌破開盤價或 exit_by
     exit_by: time = time(9, 30)
     slippage_ticks: int = 1
 
@@ -82,6 +85,8 @@ def simulate(code: str, bars_t: pd.DataFrame, bars_t1: pd.DataFrame, lim_t: Limi
         sell(0, open_t1, None, "gap_down")
         return tr
     sell(0, open_t1, p.open_sell_frac, "open")
+    if tr.remaining <= 1e-9:
+        return tr
     times = t1["ts"].dt.time
     for i in range(len(t1)):
         if times[i] >= p.exit_by:

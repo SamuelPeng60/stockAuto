@@ -47,7 +47,7 @@ def summarize(trades: pd.DataFrame, ret_col: str = "net_ret", date_col: str = "t
 def format_table(rows: dict[str, dict]) -> str:
     """{區段名稱: summarize() 結果} → 文字表格。"""
     fmt = {"勝率": "{:.1%}", "平均淨報酬": "{:.3%}", "中位數": "{:.3%}", "MDD": "{:.1%}",
-           "月正報酬比例": "{:.1%}", "筆數": "{:,.0f}", "月數": "{:,.0f}"}
+           "月正報酬比例": "{:.1%}", "停損率": "{:.1%}", "收盤漲停": "{:.1%}", "筆數": "{:,.0f}", "月數": "{:,.0f}"}
 
     def cell(c: str, v) -> str:
         if pd.isna(v):

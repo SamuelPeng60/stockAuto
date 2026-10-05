@@ -18,6 +18,7 @@ from typing import Callable
 
 import pandas as pd
 
+from st.core.calendar import prev_day_map
 from st.core.prices import limit_down, limit_up
 
 from .fetch import DATA_DIR, RAW_DIR
@@ -68,17 +69,25 @@ def build_twse() -> pd.DataFrame:
 
 
 def build_tpex() -> pd.DataFrame:
-    q = _load_all("tpex_quotes", parse_tpex_quotes)
-    if q.empty:
-        return q
-    days = sorted(q["date"].unique())
-    prev_day = dict(zip(days[1:], days[:-1]))
-    q["prev_date"] = q["date"].map(prev_day)
+    # 兩個來源：tpex_quotes（含權證的完整版）與 tpex_lite（不含權證）。同一天兩者都有時用完整版
+    full = _load_all("tpex_quotes", parse_tpex_quotes)
+    lite = _load_all("tpex_lite", parse_tpex_quotes)
+    if not full.empty and not lite.empty:
+        lite = lite[~lite["date"].isin(full["date"].unique())]
+    parts = [p for p in (full, lite) if not p.empty]
+    if not parts:
+        return pd.DataFrame()
+    q = pd.concat(parts, ignore_index=True)
+    # 前一交易日；跨資料缺口不配對，否則會把幾年前的「次日漲跌停價」套到缺口後第一天
+    q["prev_date"] = q["date"].map(prev_day_map(q["date"]))
     nxt = q[["date", "code", "next_ref", "next_limit_up", "next_limit_down"]].rename(
         columns={"date": "prev_date", "next_ref": "ref",
                  "next_limit_up": "limit_up", "next_limit_down": "limit_down"})
     df = q.merge(nxt, on=["prev_date", "code"], how="left")
     df["limit_src"] = df["limit_up"].notna().map({True: "official", False: None})
+    # tpex_lite 沒有次日參考價：用「收盤 − 漲跌」推當日參考價（漲跌停價仍是前一日的官方值）
+    calc = df["ref"].isna() & df["limit_up"].notna() & df["close"].notna() & df["change"].notna()
+    df.loc[calc, "ref"] = (df.loc[calc, "close"] - df.loc[calc, "change"]).round(2)
     df["market"] = "TPEX"
     return df
 

@@ -61,6 +61,31 @@ def test_slippage(daily):
     assert e.buy_px == 121.0
 
 
+def test_min_gap_only_shorts_gap_up(daily):
+    c0 = CostModel(discount=1.0, min_fee=20, slippage_ticks=0)
+    t = build_trades(daily, Params(cost=c0)).set_index("code")
+    assert t.loc["1101", "gap"] == pytest.approx(108 / 110 - 1)  # 開低
+    assert t.loc["3303", "gap"] == pytest.approx(0.1) and t.loc["3303", "open_at_limit_up"]
+    assert set(build_trades(daily, Params(cost=c0, min_gap=0.0))["code"]) == {"3303"}
+
+
+def test_daily_stop(daily):
+    c0 = CostModel(discount=1.0, min_fee=20, slippage_ticks=0)
+    # 1101：開 108、高 109。停損 0.5% → 108.54 進位到 109.0，觸發，以 109 回補
+    a = build_trades(daily, Params(cost=c0, stop_pct=0.005)).set_index("code").loc["1101"]
+    assert a.stopped and a.buy_px == 109.0
+    assert a.gross_ret == pytest.approx((108 - 109) / 108)
+    # 停損 3% → 111.5，沒碰到，收盤 104 回補
+    a = build_trades(daily, Params(cost=c0, stop_pct=0.03)).set_index("code").loc["1101"]
+    assert not a.stopped and a.buy_px == 104.0
+    # 3303 開在漲停 121：停損價高於漲停價，永遠不會觸發
+    e = build_trades(daily, Params(cost=c0, stop_pct=0.03)).set_index("code").loc["3303"]
+    assert not e.stopped and e.buy_px == 121.0
+    # 滑價加在停損價之上
+    c1 = CostModel(discount=1.0, min_fee=20, slippage_ticks=1)
+    assert build_trades(daily, Params(cost=c1, stop_pct=0.005)).set_index("code").loc["1101", "buy_px"] == 109.5
+
+
 def test_markets_param(daily):
     t = build_trades(daily, Params(markets=("TWSE", "TPEX")))
     assert "6488" in set(t["code"])

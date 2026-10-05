@@ -42,7 +42,7 @@ def _twse_sign(html: str) -> float:
 
 
 def _norm(field: str) -> str:
-    return re.sub(r"\s+", "", field)
+    return re.sub(r"\s+|<br\s*/?>", "", field)
 
 
 def _frame(rows: list[dict], d: date) -> pd.DataFrame:
@@ -93,7 +93,8 @@ def parse_twse_limits(raw: dict, d: date) -> pd.DataFrame:
 
 
 def parse_tpex_quotes(raw: dict, d: date) -> pd.DataFrame:
-    """上櫃行情。注意參考價與漲跌停價欄位是「次日」的，要由 build 移到下一個交易日。"""
+    """上櫃行情（tpex_quotes 與不含權證的 tpex_lite 共用）。
+    注意參考價與漲跌停價欄位是「次日」的，要由 build 移到下一個交易日。tpex_lite 沒有次日參考價 → NaN。"""
     tables = raw.get("tables") or []
     if not tables or not tables[0].get("data"):
         return pd.DataFrame()
@@ -113,7 +114,7 @@ def parse_tpex_quotes(raw: dict, d: date) -> pd.DataFrame:
                 "volume": num(r[f["成交股數"]]),
                 "value": num(r[f["成交金額(元)"]]),
                 "trades": num(r[f["成交筆數"]]),
-                "next_ref": num(r[f["次日參考價"]]),
+                "next_ref": num(r[f["次日參考價"]]) if "次日參考價" in f else np.nan,
                 "next_limit_up": num(r[f["次日漲停價"]]),
                 "next_limit_down": num(r[f["次日跌停價"]]),
             }

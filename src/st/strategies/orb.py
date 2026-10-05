@@ -1,6 +1,6 @@
 """做多 B／做空 B：開盤區間突破（ORB），加 VWAP 濾網與 ATR 停損。報告證據評級 D（個股），參數皆未驗證。
 
-做多 B：前日漲幅 >5% 或收盤創 20 日新高、成交值 >5 億、流動性前 200 名
+做多 B：前日漲幅 >5% 或收盤創 20 日新高、成交值 >5 億、流動性前 200 名；排除前日收漲停股（留給做空 A）
   09:15–11:00 間 1 分 K 收盤突破 09:00–09:15 區間高點且在 VWAP 之上 → 下一根開盤買進；
   距漲停 <2% 不進場。停損取「區間低點」與「進場價 − 1×ATR(14, 5 分 K)」較近者；
   2R 先出一半，其餘收盤跌破 VWAP 出場；13:15 前全部平倉。
@@ -38,13 +38,15 @@ class Params:
     min_value: float = 5e8
     liquidity_rank: int = 200
     liquidity_days: int = 20
+    # 前日收漲停股屬於做空 A 的選股池，且證據顯示次日盤中偏弱 → 做多 B 排除，避免自己跟自己對作
+    exclude_prev_limit_up: bool = False
 
     @property
     def exit_at(self) -> time:
         return self.exit_time or (time(13, 15) if self.side == LONG else time(13, 20))
 
 
-LONG_B = Params(side=LONG, prev_move=0.05)
+LONG_B = Params(side=LONG, prev_move=0.05, exclude_prev_limit_up=True)
 SHORT_B = Params(side=SHORT, prev_move=0.04)
 
 
@@ -63,12 +65,17 @@ def select_candidates(daily: pd.DataFrame, p: Params) -> pd.DataFrame:
     avg_value = g["value"].transform(lambda s: s.rolling(p.liquidity_days, min_periods=p.liquidity_days).mean())
     d["liq_rank"] = avg_value.groupby(d["date"]).rank(ascending=False)
     d["prev_close_limit_down"] = d["close"].round(2) == d["limit_down"].round(2)
-    sel = d[(move | extreme) & (d["value"] > p.min_value) & (d["liq_rank"] <= p.liquidity_rank)]
+    d["prev_close_limit_up"] = d["close"].round(2) == d["limit_up"].round(2)
+    ok = (move | extreme) & (d["value"] > p.min_value) & (d["liq_rank"] <= p.liquidity_rank)
+    if p.exclude_prev_limit_up:
+        ok &= ~d["prev_close_limit_up"]
+    sel = d[ok]
 
     # 對應到下一個交易日（該股當日必須有資料，否則視為暫停交易）
     sel = sel.assign(trade_date=sel["date"].map(next_day_map(d["date"]))).dropna(subset=["trade_date"])
     today = d[["date", "code", "ref", "limit_up", "limit_down", "market"]].rename(columns={"date": "trade_date"})
-    out = sel[["trade_date", "code", "name", "pct", "value", "liq_rank", "prev_close_limit_down"]].merge(
+    out = sel[["trade_date", "code", "name", "pct", "value", "liq_rank", "prev_close_limit_down",
+               "prev_close_limit_up"]].merge(
         today, on=["trade_date", "code"], how="inner")
     return out.dropna(subset=["limit_up", "limit_down", "ref"]).reset_index(drop=True)
 

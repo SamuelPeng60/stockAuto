@@ -146,11 +146,17 @@ def lock_limit_day(close=110.0):
 
 def test_long_a_open_then_break_open():
     t1 = make_bars("2021-03-03", 114, {"09:00": (115, 115, 114, 114)})  # 開 115，第一根收 114 跌破開盤
-    p = long_a.Params(slippage_ticks=0)
+    p = long_a.Params(slippage_ticks=0, open_sell_frac=0.5)  # 舊版：開盤賣一半
     tr = long_a.simulate("1101", lock_limit_day(), t1, Limits(110, 90), Limits(121, 99), p)
     assert tr.entry_px == 110
     assert [(e.reason, e.frac) for e in tr.exits] == [("open", 0.5), ("break_open", 0.5)]
     assert tr.gross_ret() == pytest.approx(0.5 * 5 / 110 + 0.5 * 4 / 110)
+    # 預設：開盤集合競價全部出清，不留部位和做空 A 對賭
+    tr = long_a.simulate("1101", lock_limit_day(), t1, Limits(110, 90), Limits(121, 99),
+                         long_a.Params(slippage_ticks=0))
+    assert [(e.reason, e.frac) for e in tr.exits] == [("open", 1.0)]
+    assert tr.exits[0].ts == pd.Timestamp("2021-03-03 09:00")
+    assert tr.gross_ret() == pytest.approx(5 / 110)
 
 
 def test_long_a_gap_down_and_fill_modes():
