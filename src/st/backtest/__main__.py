@@ -1,6 +1,7 @@
 """用法：
   python -m st.backtest short_a [--discount 1.0] [--min-fee 20] [--slip 1] [--markets TWSE]
   python -m st.backtest overnight [同上]
+  python -m st.backtest dryup [同上] [--scan]     # 窒息量；--scan 只列出資料最後一天符合條件的股票
 
 輸出：終端機報表，以及 data/results/<策略>_trades.csv、<策略>_report.txt
 """
@@ -15,7 +16,7 @@ import pandas as pd
 from st.core.costs import CostModel
 from st.data.build import load_daily
 from st.data.fetch import DATA_DIR
-from st.strategies import orb, overnight, short_a
+from st.strategies import dryup, orb, overnight, short_a
 
 from .metrics import format_table, summarize
 from .segments import split
@@ -187,9 +188,90 @@ def report_overnight(daily, p: overnight.Params) -> str:
     return text
 
 
+def report_dryup(daily, p: dryup.Params) -> str:
+    d = dryup.prepare(daily, p)
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    tag = _tag(p.markets)
+    c = p.cost
+
+    def row(t) -> dict:
+        s = summarize(t)
+        if not len(t):
+            return s
+        ex = summarize(t, ret_col="excess_ret")
+        return s | {"毛報酬": t["gross_ret"].mean(), "超額": ex["平均淨報酬"], "超額t值": ex["t值"],
+                    "長紅命中": t["red_hit"].mean()}
+
+    fmt = {"筆數": "{:,.0f}", "勝率": "{:.1%}", "平均淨報酬": "{:+.3%}", "中位數": "{:+.3%}", "t值": "{:.2f}",
+           "毛報酬": "{:+.3%}", "超額": "{:+.3%}", "超額t值": "{:.2f}", "長紅命中": "{:.1%}"}
+
+    def table(rows: dict) -> str:
+        df = pd.DataFrame(rows).T.reindex(columns=list(fmt))
+        return df.apply(lambda col: col.map(lambda v: "-" if pd.isna(v) else fmt[col.name].format(v))).to_string()
+
+    main = dryup.build_trades(d, p, hold=5)
+    main.to_csv(RESULTS / f"dryup{tag}_trades.csv", index=False, encoding="utf-8-sig")
+    out = [
+        "窒息量：原本有量、整理後量縮到極點、價格守住 → T+1 開盤買、持有 N 日後收盤賣（非當沖，證交稅 0.3%）",
+        f"市場 {','.join(p.markets)}｜手續費折扣 {c.discount}｜滑價每邊 {c.slippage_ticks} 檔"
+        f"｜來回成本 {c.round_trip_pct(daytrade=False):.3%}（不含滑價）",
+        f"訊號：量 ≤ 近 {p.lookback} 日最大量 × {p.dry_ratio:.0%}｜近 {p.lookback} 日均成交值 ≥ {p.min_value / 1e8:.1f} 億"
+        f"｜收盤 ≥ {p.ma_days} 日均線｜距 {p.lookback} 日高點回檔 ≤ {p.max_pullback:.0%}"
+        f"｜近 {p.tight_days} 日振幅 ≤ {p.tight_range:.0%}｜同一檔 {p.cooldown} 日內不重複",
+        f"資料期間 {daily['date'].min().date()} ~ {daily['date'].max().date()}",
+        "※ 超額 = 毛報酬 − 同一進場日全部（過流動性門檻）股票的平均報酬；持有多日的樣本互相重疊，t 值偏高。",
+        f"※ 長紅命中 = 訊號後 {p.red_window} 個交易日內出現「漲幅 ≥ {p.red_ret:.0%} 且收紅」；"
+        f"全部股票的基準命中率 {main.attrs['base_red_rate']:.1%}。",
+        "",
+    ]
+
+    out += ["== 持有天數（全部條件）==",
+            table({f"持有 {h} 日": row(dryup.build_trades(d, p, hold=h)) for h in (1, 3, 5, 10, 20)}), ""]
+
+    steps = {"只看量縮": ("f_dry",), "＋原本有量": ("f_dry", "f_liquid"),
+             "＋站上均線": ("f_dry", "f_liquid", "f_above_ma"),
+             "＋離高點不遠": ("f_dry", "f_liquid", "f_above_ma", "f_near_high"), "＋窄幅整理（全部條件）": dryup.FLAGS,
+             "對照：有量、價格守住、窄幅，但不要求量縮": ("f_liquid", "f_above_ma", "f_near_high", "f_tight")}
+    out += ["== 條件逐步疊加（持有 5 日）==",
+            table({k: row(dryup.build_trades(d, p, hold=5, flags=f)) for k, f in steps.items()}), ""]
+
+    out += ["== 量縮門檻敏感度（全部條件，持有 5 日）==",
+            table({f"量 ≤ 最大量 × {r:.0%}": row(dryup.build_trades(d, replace(p, dry_ratio=r), hold=5))
+                   for r in (0.05, 0.07, 0.10, 0.15, 0.20, 0.30)}), ""]
+
+    out += ["== 各區段（全部條件，持有 5 日）==",
+            table({k: row(v) for k, v in split(main).items() if len(v)}), ""]
+
+    rows = {}
+    for disc, mf in ((1.0, 20), (0.2, 1)):
+        for slip in (0, 1, 2):
+            q = replace(p, cost=CostModel(discount=disc, min_fee=mf, slippage_ticks=slip))
+            rows[f"折扣{disc} 滑價{slip}檔"] = summarize(dryup.build_trades(d, q, hold=5))
+    out += ["== 成本敏感度（全部條件，持有 5 日）==", format_table(rows), ""]
+
+    if len(main):
+        hit = main[main["red_hit"]]
+        out.append(f"{len(main):,} 筆中：T+1 開盤即漲停（多半買不到）{main['open_at_limit_up'].mean():.1%}；"
+                   f"{p.red_window} 日內出現長紅 {len(hit):,} 筆，其中第 1 天就長紅 {(hit['days_to_red'] == 1).mean():.1%}、"
+                   f"平均等 {hit['days_to_red'].mean():.1f} 天")
+    out += ["", f"== 資料最後一天（{d['date'].max().date()}）符合全部條件的股票 ==", _scan_text(d, p)]
+    text = "\n".join(out)
+    (RESULTS / f"dryup{tag}_report.txt").write_text(text, encoding="utf-8")
+    return text
+
+
+def _scan_text(d, p: dryup.Params) -> str:
+    s = dryup.scan(d, p)
+    if s.empty:
+        return "(沒有)"
+    s = s.assign(量比=s["vol_ratio"].map("{:.1%}".format), 均成交值億=(s["value_avg"] / 1e8).map("{:.2f}".format),
+                 回檔=s["pullback"].map("{:.1%}".format), 五日振幅=s["range"].map("{:.1%}".format))
+    return s[["code", "name", "close", "量比", "均成交值億", "回檔", "五日振幅"]].to_string(index=False)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="python -m st.backtest")
-    ap.add_argument("strategy", choices=["short_a", "overnight"])
+    ap.add_argument("strategy", choices=["short_a", "overnight", "dryup"])
     ap.add_argument("--discount", type=float, default=1.0)
     ap.add_argument("--min-fee", type=int, default=20)
     ap.add_argument("--slip", type=int, default=1)
@@ -197,11 +279,17 @@ def main() -> None:
     ap.add_argument("--min-gap", type=float, default=None, help="做空 A：只空 T+1 開盤漲幅 > 此值（0 = 只空開高）")
     ap.add_argument("--stop", type=float, default=None, help="做空 A：漲到開盤價 ×(1+stop) 就回補，例如 0.03")
     ap.add_argument("--start", default=None, help="只用這一天以後的日 K，例如 2024-01-01")
+    ap.add_argument("--scan", action="store_true", help="窒息量：只列出資料最後一天符合條件的股票，不跑回測")
     a = ap.parse_args()
 
     daily = load_daily()
     if a.start:
         daily = daily[daily["date"] >= a.start]
+    if a.strategy == "dryup":
+        p = dryup.Params(markets=tuple(a.markets.split(",")),
+                         cost=CostModel(discount=a.discount, min_fee=a.min_fee, slippage_ticks=a.slip))
+        print(_scan_text(dryup.prepare(daily, p), p) if a.scan else report_dryup(daily, p))
+        return
     if a.strategy == "overnight":
         print(report_overnight(daily, overnight.Params(
             markets=tuple(a.markets.split(",")),

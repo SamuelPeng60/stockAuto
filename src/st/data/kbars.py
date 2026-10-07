@@ -1,6 +1,7 @@
 """Shioaji 1 分 K 下載器：只抓策略用得到的（股票, 日期），存進 BarStore。
 
-- 需求清單由日 K 算出（plan）：做多 A 要 T 與 T+1，做多 B 要交易日與前一交易日（算 ATR）
+- 需求清單由日 K 算出（plan）：做多 A 要 T 與 T+1，做多 B 要交易日與前一交易日（算 ATR），
+  整理區間突破只要觸發當天
 - 每檔股票把相鄰的交易日併成一段，一段一個請求；抓過的（含沒資料的）記在
   data/minute/_done.csv，重跑會跳過（斷點續抓）
 - 流量：每 usage_every 個請求查一次 api.usage()，剩餘額度低於 min_remaining_mb 就停
@@ -17,14 +18,14 @@ import csv
 import logging
 import os
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import time
 from pathlib import Path
 
 import pandas as pd
 
 from st.core.calendar import prev_day_map
-from st.strategies import long_a, orb
+from st.strategies import breakout, long_a, orb
 
 from .minute import MINUTE_DIR, BarStore
 
@@ -44,6 +45,22 @@ class Scope:
     long_a: long_a.Params | None = long_a.Params(use_consolidation=False, use_volume_high=False)
     long_b: orb.Params | None = orb.LONG_B
     long_b_prev_day: bool = True  # 前一交易日的分 K（ATR 用）
+    breakout: breakout.Params | None = None  # 整理區間突破：只要 T 日（最高價突破區間上緣的那天）
+
+
+# 下載用的突破選股：區間振幅放寬到 15%，回測時再收緊（8%／10% 都是它的子集）
+BREAKOUT_WIDE = breakout.Params(box_range=0.15)
+
+
+def scope_for(strategies: list[str], markets: tuple[str, ...]) -> Scope:
+    """CLI 的 --strategies（long_a,long_b,breakout）→ Scope。"""
+    unknown = set(strategies) - {"long_a", "long_b", "breakout"}
+    if unknown:
+        raise ValueError(f"不認得的策略：{sorted(unknown)}")
+    base = Scope(markets=markets)
+    return replace(base, long_a=base.long_a if "long_a" in strategies else None,
+                   long_b=base.long_b if "long_b" in strategies else None,
+                   breakout=BREAKOUT_WIDE if "breakout" in strategies else None)
 
 
 def plan(daily: pd.DataFrame, start: str, end: str, scope: Scope = Scope()) -> pd.DataFrame:
@@ -58,6 +75,9 @@ def plan(daily: pd.DataFrame, start: str, end: str, scope: Scope = Scope()) -> p
         need |= set(zip(c["code"], c["trade_date"]))
         if scope.long_b_prev_day:
             need |= set(zip(c["code"], c["trade_date"].map(prev_day_map(d["date"]))))
+    if scope.breakout is not None:
+        c = breakout.select_candidates(d, replace(scope.breakout, markets=scope.markets))
+        need |= set(zip(c["code"], c["trade_date"]))
     lo, hi = pd.Timestamp(start), pd.Timestamp(end)
     rows = [(code, day) for code, day in need if pd.notna(day) and lo <= day <= hi]
     return pd.DataFrame(rows, columns=["code", "date"]).sort_values(["code", "date"]).reset_index(drop=True)

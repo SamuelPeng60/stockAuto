@@ -1,6 +1,6 @@
 """用法：
   python -m st.data fetch --start 2017-04-01 [--end 2026-09-29] [--sources twse_quotes,twse_limits,tpex_quotes]
-  python -m st.data kbars --start 2024-01-01 --end 2026-10-02 [--dry-run] [--max-requests 20]
+  python -m st.data kbars --start 2024-01-01 --end 2026-10-02 [--strategies breakout] [--dry-run] [--max-requests 20]
   python -m st.data build
   python -m st.data check
 """
@@ -28,6 +28,7 @@ def main() -> None:
     k.add_argument("--start", required=True)
     k.add_argument("--end", required=True)
     k.add_argument("--markets", default="TWSE")
+    k.add_argument("--strategies", default="long_a,long_b", help="long_a,long_b,breakout 任選，逗號分隔")
     k.add_argument("--dry-run", action="store_true", help="只列出需求量，不登入、不下載")
     k.add_argument("--max-requests", type=int, default=None, help="本次最多幾個請求（試抓用）")
     k.add_argument("--interval", type=float, default=0.5, help="請求間隔秒數")
@@ -42,7 +43,7 @@ def main() -> None:
         from . import kbars
 
         daily = load_daily()
-        need = kbars.plan(daily, a.start, a.end, kbars.Scope(markets=tuple(a.markets.split(","))))
+        need = kbars.plan(daily, a.start, a.end, kbars.scope_for(a.strategies.split(","), tuple(a.markets.split(","))))
         done = kbars.load_done()
         left = need[[(c, d) not in done for c, d in zip(need["code"], need["date"])]]
         cal = daily.loc[daily["market"].isin(a.markets.split(",")), "date"]

@@ -36,3 +36,9 @@ def test_done_roundtrip(tmp_path):
     p = tmp_path / "_done.csv"
     kbars._mark_done([("1101", DAYS[0], 266), ("1101", DAYS[1], 0)], p)
     assert kbars.load_done(p) == {("1101", DAYS[0]), ("1101", DAYS[1])}
+
+
+def test_scope_for_breakout_only():
+    s = kbars.scope_for(["breakout"], ("TPEX",))
+    assert s.long_a is None and s.long_b is None and s.breakout.box_range == 0.15 and s.markets == ("TPEX",)
+    assert kbars.scope_for(["long_a", "long_b"], ("TWSE",)) == kbars.Scope()
